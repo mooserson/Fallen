@@ -216,71 +216,107 @@
   }
 
   // War's big sword sweeps from over-the-head down to the ground.
-  // Hitbox is a wide rectangle in front of him while swinging.
-  function warSwordHitbox(e) {
-    const reach = 80;
+  // The hitbox follows the blade segment so early-swing frames (blade still raised)
+  // don't damage the player at his feet.
+  function warBladeSegment(e) {
+    const handX = e.x + e.w / 2 + e.facing * (e.w / 2 - 4);
+    const handY = e.y + 22;
+    const bladeLen = 70;
+    let ang;
+    if (e.state === 'windup') {
+      const t = Math.min(1, e.stateTime / 32);
+      const rest = e.facing > 0 ? Math.PI * 0.35 : Math.PI - Math.PI * 0.35;
+      const over = e.facing > 0 ? -Math.PI * 0.75 : Math.PI + Math.PI * 0.75;
+      ang = rest + (over - rest) * (1 - (1 - t) * (1 - t));
+    } else if (e.state === 'swing') {
+      const t = Math.min(1, e.stateTime / 16);
+      const over = e.facing > 0 ? -Math.PI * 0.75 : Math.PI + Math.PI * 0.75;
+      const down = e.facing > 0 ? Math.PI * 0.45 : Math.PI - Math.PI * 0.45;
+      ang = over + (down - over) * (t * t);
+    } else if (e.state === 'charge') {
+      ang = e.facing > 0 ? 0 : Math.PI;
+    } else {
+      ang = e.facing > 0 ? Math.PI * 0.35 : Math.PI - Math.PI * 0.35;
+    }
     return {
-      x: e.facing > 0 ? e.x + e.w - 6 : e.x - reach + 6,
-      y: e.y + 4,
-      w: reach,
-      h: e.h + 6,
+      x1: handX + Math.cos(ang) * 6,
+      y1: handY + Math.sin(ang) * 6,
+      x2: handX + Math.cos(ang) * bladeLen,
+      y2: handY + Math.sin(ang) * bladeLen,
     };
   }
 
+  function segmentsCross(ax, ay, bx, by, cx, cy, dx, dy) {
+    const d1 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    const d2 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax);
+    const d3 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx);
+    const d4 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx);
+    return (d1 * d2 < 0) && (d3 * d4 < 0);
+  }
+
+  function segmentHitsRect(seg, r) {
+    // either endpoint inside the rect
+    if (seg.x1 >= r.x && seg.x1 <= r.x + r.w && seg.y1 >= r.y && seg.y1 <= r.y + r.h) return true;
+    if (seg.x2 >= r.x && seg.x2 <= r.x + r.w && seg.y2 >= r.y && seg.y2 <= r.y + r.h) return true;
+    const rx2 = r.x + r.w, ry2 = r.y + r.h;
+    return segmentsCross(seg.x1, seg.y1, seg.x2, seg.y2, r.x,  r.y,  rx2,  r.y)  ||
+           segmentsCross(seg.x1, seg.y1, seg.x2, seg.y2, rx2,  r.y,  rx2,  ry2)  ||
+           segmentsCross(seg.x1, seg.y1, seg.x2, seg.y2, r.x,  ry2,  rx2,  ry2)  ||
+           segmentsCross(seg.x1, seg.y1, seg.x2, seg.y2, r.x,  r.y,  r.x,  ry2);
+  }
+
   // The full War boss AI lives here so the enemy loop stays readable.
+  // Facing only updates in idle/approach. Once he commits to windup/swing/charge,
+  // facing is locked so jumping over him doesn't snap him around mid-attack.
   function updateWar(e, dx) {
     e.stateTime++;
     if (e.knockTime > 0) { e.vx *= 0.85; return; }
 
     const adx = Math.abs(dx);
     const facePlayer = () => { e.facing = dx >= 0 ? 1 : -1; };
+    const commitAttack = (next) => {
+      facePlayer();           // snapshot facing at the moment of commitment
+      e.state = next;
+      e.stateTime = 0;
+      e.swingHit = false;
+    };
 
     switch (e.state) {
       case 'idle': {
         e.vx *= 0.8;
         facePlayer();
         if (e.cooldown > 0) { e.cooldown--; break; }
-        // pick next move based on range
-        if (adx < 110) { e.state = 'windup'; e.stateTime = 0; e.swingHit = false; }
-        else if (adx > 220 && Math.random() < 0.02) { e.state = 'charge'; e.stateTime = 0; }
+        if (adx < 110) commitAttack('windup');
+        else if (adx > 220 && Math.random() < 0.02) commitAttack('charge');
         else { e.state = 'approach'; e.stateTime = 0; }
         break;
       }
       case 'approach': {
         facePlayer();
         e.vx = e.facing * 1.6;
-        if (adx < 90) { e.state = 'windup'; e.stateTime = 0; e.swingHit = false; }
+        if (adx < 90) commitAttack('windup');
         else if (e.stateTime > 90) { e.state = 'idle'; e.cooldown = 20; }
         break;
       }
       case 'windup': {
         e.vx *= 0.7;
-        facePlayer();
-        // brief telegraph — about half a second
+        // facing locked
         if (e.stateTime >= 32) { e.state = 'swing'; e.stateTime = 0; }
         break;
       }
       case 'swing': {
-        e.vx = e.facing * 1.2; // small step into the swing
+        e.vx = e.facing * 1.2;
         if (e.stateTime >= 16) { e.state = 'recover'; e.stateTime = 0; }
         break;
       }
       case 'recover': {
         e.vx *= 0.6;
-        if (e.stateTime >= 28) {
-          e.state = 'idle';
-          // longer cooldown after a swing — this is the player's punish window
-          e.cooldown = 45;
-        }
+        if (e.stateTime >= 28) { e.state = 'idle'; e.cooldown = 45; }
         break;
       }
       case 'charge': {
-        if (e.stateTime === 1) facePlayer();
         e.vx = e.facing * 5.5;
-        if (e.stateTime >= 36 || adx < 40) {
-          e.state = 'recover';
-          e.stateTime = 0;
-        }
+        if (e.stateTime >= 36 || adx < 40) { e.state = 'recover'; e.stateTime = 0; }
         break;
       }
     }
@@ -576,12 +612,14 @@
         damagePlayer(e);
       }
 
-      // war sword hitbox
+      // war sword hitbox — segment of the blade vs (slightly inflated) player rect
       if (e.type === 'war' && e.state === 'swing' && !e.swingHit) {
-        const hb = warSwordHitbox(e);
-        if (rectsOverlap(player, hb) && player.invuln <= 0) {
+        const seg = warBladeSegment(e);
+        const pad = 4; // half-blade thickness
+        const pr = { x: player.x - pad, y: player.y - pad, w: player.w + pad * 2, h: player.h + pad * 2 };
+        if (segmentHitsRect(seg, pr) && player.invuln <= 0) {
           e.swingHit = true;
-          damagePlayer(e, 2); // big sword hurts more
+          damagePlayer(e, 2);
         }
       }
     }
