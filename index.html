@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Fallen</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #07080d;
+    overflow: hidden;
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #b9c2d0;
+  }
+  #wrap {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+  }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    box-shadow: 0 0 60px rgba(80, 120, 200, 0.15);
+    background: #07080d;
+  }
+  #hud {
+    position: fixed;
+    top: 12px;
+    left: 16px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.55;
+    pointer-events: none;
+    line-height: 1.6;
+    text-shadow: 0 0 6px #000;
+  }
+  #hud b { color: #e9d9a8; font-weight: 600; }
+  #title {
+    position: fixed;
+    bottom: 14px;
+    right: 18px;
+    font-size: 10px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    opacity: 0.35;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <div id="wrap"><canvas id="game" width="960" height="540"></canvas></div>
+  <div id="hud">
+    <div><b>A / D</b> &nbsp; move</div>
+    <div><b>Space</b> &nbsp; jump &middot; double jump</div>
+    <div><b>Shift</b> &nbsp; dash</div>
+    <div><b>against wall</b> &nbsp; cling &middot; wall jump</div>
+    <div><b>J</b> &nbsp; tiny sword</div>
+  </div>
+  <div id="title">Fallen</div>
+  <script src="game.js"></script>
+</body>
+</html>
