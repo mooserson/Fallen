@@ -23,38 +23,67 @@
   const tapped = (...ks) => ks.some(k => pressed.has(k));
 
   // ---------- level ----------
-  // Solid rectangles. The room is hand-tuned to teach each ability in sequence.
-  const solids = [
-    // floor
-    { x: 0, y: 500, w: W, h: 40 },
-    // left wall
-    { x: 0, y: 0, w: 20, h: H },
-    // right wall
-    { x: W - 20, y: 0, w: 20, h: H },
-    // ceiling
-    { x: 0, y: 0, w: W, h: 20 },
+  // Each room is a self-contained set of solids + a spawn hook. Routed by location.hash.
+  let solids = [];
 
-    // ground platforms (left side, intro hops)
-    { x: 140, y: 440, w: 110, h: 18 },
-    { x: 300, y: 390, w: 110, h: 18 },
+  const ROOMS = {
+    playground: {
+      build() {
+        solids = [
+          { x: 0, y: 500, w: W, h: 40 },
+          { x: 0, y: 0, w: 20, h: H },
+          { x: W - 20, y: 0, w: 20, h: H },
+          { x: 0, y: 0, w: W, h: 20 },
 
-    // double-jump gap — a tall island reachable only with two jumps
-    { x: 470, y: 320, w: 90, h: 18 },
+          { x: 140, y: 440, w: 110, h: 18 },
+          { x: 300, y: 390, w: 110, h: 18 },
+          { x: 470, y: 320, w: 90, h: 18 },
+          { x: 620, y: 320, w: 30, h: 180 },
+          { x: 800, y: 320, w: 140, h: 18 },
+          { x: 720, y: 120, w: 22, h: 180 },
+          { x: 880, y: 60,  w: 22, h: 200 },
+          { x: 480, y: 120, w: 220, h: 16 },
+          { x: 70, y: 300, w: 70, h: 14 },
+        ];
+        spawnHusk(220, 410);
+        spawnHusk(500, 290);
+        spawnHusk(860, 290);
+      },
+      playerSpawn: { x: 60, y: 460 },
+    },
+    boss: {
+      build() {
+        // wide empty arena with just floor + walls + ceiling
+        solids = [
+          { x: 0, y: 500, w: W, h: 40 },
+          { x: 0, y: 0, w: 20, h: H },
+          { x: W - 20, y: 0, w: 20, h: H },
+          { x: 0, y: 0, w: W, h: 20 },
+        ];
+        spawnWar(W - 180, 420);
+      },
+      playerSpawn: { x: 80, y: 460 },
+    },
+  };
 
-    // dash gap — long horizontal jump over a pit
-    { x: 620, y: 320, w: 30, h: 180 }, // pillar to stand on
-    { x: 800, y: 320, w: 140, h: 18 }, // landing on far side
+  function loadRoom(name) {
+    if (!ROOMS[name]) name = 'playground';
+    enemies.length = 0;
+    particles.length = 0;
+    ROOMS[name].build();
+    const sp = ROOMS[name].playerSpawn;
+    player.x = sp.x; player.y = sp.y;
+    player.vx = 0; player.vy = 0;
+    player.hp = player.maxHp;
+    player.invuln = 30;
+    currentRoom = name;
+  }
+  let currentRoom = 'playground';
 
-    // wall-climb tower (right side) — two facing walls to chain wall jumps up
-    { x: 720, y: 120, w: 22, h: 180 },
-    { x: 880, y: 60,  w: 22, h: 200 },
-
-    // upper ledge — reward for reaching the top
-    { x: 480, y: 120, w: 220, h: 16 },
-
-    // a small floating perch on the left to invite double jump
-    { x: 70, y: 300, w: 70, h: 14 },
-  ];
+  window.addEventListener('hashchange', () => {
+    const name = location.hash.replace('#', '') || 'playground';
+    loadRoom(name);
+  });
 
   // ---------- player ----------
   const player = {
@@ -98,12 +127,32 @@
       knockTime: 0,
       dead: false,
       aggro: 0,
+      contactDmg: 1,
     });
   }
-  // Place a few patrolling husks on the room's surfaces.
-  spawnHusk(220, 410);   // low ledge on the left
-  spawnHusk(500, 290);   // double-jump island
-  spawnHusk(860, 290);   // far-right landing
+  function spawnWar(x, y) {
+    enemies.push({
+      id: enemyIdSeq++,
+      type: 'war',
+      x, y, w: 44, h: 62,           // ~2.4x player height
+      vx: 0, vy: 0,
+      facing: -1,
+      hp: 24,
+      maxHp: 24,
+      onGround: false,
+      hitFlash: 0,
+      knockTime: 0,
+      dead: false,
+      aggro: 0,
+      contactDmg: 1,
+      // AI state machine: idle | approach | windup | swing | recover | charge
+      state: 'idle',
+      stateTime: 0,
+      cooldown: 60,
+      swingHit: false,          // whether the current swing has connected
+      isBoss: true,
+    });
+  }
 
   let hitstop = 0; // frames where the world freezes for impact juice
 
@@ -141,6 +190,99 @@
         size: opts.size || (1 + Math.random() * 1.5),
         gravity: opts.gravity ?? 0.12,
       });
+    }
+  }
+
+  // ---------- combat helpers ----------
+  function damagePlayer(source, amount = 1) {
+    const kdx = (player.x + player.w / 2) - (source.x + source.w / 2);
+    player.vx = (kdx >= 0 ? 1 : -1) * (source.isBoss ? 7 : 5);
+    player.vy = -5.5;
+    player.hp -= amount;
+    player.invuln = 60;
+    player.hurtFlash = 16;
+    hitstop = source.isBoss ? 8 : 5;
+    shake = Math.max(shake, source.isBoss ? 11 : 7);
+    spawnParticles(player.x + player.w / 2, player.y + player.h / 2, 14, {
+      spread: 3.5, color: '#ff8a8a', life: 30,
+    });
+    if (player.hp <= 0) {
+      player.hp = player.maxHp;
+      const sp = ROOMS[currentRoom].playerSpawn;
+      player.x = sp.x; player.y = sp.y; player.vx = 0; player.vy = 0;
+      player.invuln = 90;
+      shake = 14;
+    }
+  }
+
+  // War's big sword sweeps from over-the-head down to the ground.
+  // Hitbox is a wide rectangle in front of him while swinging.
+  function warSwordHitbox(e) {
+    const reach = 80;
+    return {
+      x: e.facing > 0 ? e.x + e.w - 6 : e.x - reach + 6,
+      y: e.y + 4,
+      w: reach,
+      h: e.h + 6,
+    };
+  }
+
+  // The full War boss AI lives here so the enemy loop stays readable.
+  function updateWar(e, dx) {
+    e.stateTime++;
+    if (e.knockTime > 0) { e.vx *= 0.85; return; }
+
+    const adx = Math.abs(dx);
+    const facePlayer = () => { e.facing = dx >= 0 ? 1 : -1; };
+
+    switch (e.state) {
+      case 'idle': {
+        e.vx *= 0.8;
+        facePlayer();
+        if (e.cooldown > 0) { e.cooldown--; break; }
+        // pick next move based on range
+        if (adx < 110) { e.state = 'windup'; e.stateTime = 0; e.swingHit = false; }
+        else if (adx > 220 && Math.random() < 0.02) { e.state = 'charge'; e.stateTime = 0; }
+        else { e.state = 'approach'; e.stateTime = 0; }
+        break;
+      }
+      case 'approach': {
+        facePlayer();
+        e.vx = e.facing * 1.6;
+        if (adx < 90) { e.state = 'windup'; e.stateTime = 0; e.swingHit = false; }
+        else if (e.stateTime > 90) { e.state = 'idle'; e.cooldown = 20; }
+        break;
+      }
+      case 'windup': {
+        e.vx *= 0.7;
+        facePlayer();
+        // brief telegraph — about half a second
+        if (e.stateTime >= 32) { e.state = 'swing'; e.stateTime = 0; }
+        break;
+      }
+      case 'swing': {
+        e.vx = e.facing * 1.2; // small step into the swing
+        if (e.stateTime >= 16) { e.state = 'recover'; e.stateTime = 0; }
+        break;
+      }
+      case 'recover': {
+        e.vx *= 0.6;
+        if (e.stateTime >= 28) {
+          e.state = 'idle';
+          // longer cooldown after a swing — this is the player's punish window
+          e.cooldown = 45;
+        }
+        break;
+      }
+      case 'charge': {
+        if (e.stateTime === 1) facePlayer();
+        e.vx = e.facing * 5.5;
+        if (e.stateTime >= 36 || adx < 40) {
+          e.state = 'recover';
+          e.stateTime = 0;
+        }
+        break;
+      }
     }
   }
 
@@ -398,29 +540,29 @@
       if (e.hitFlash > 0) e.hitFlash--;
       if (e.knockTime > 0) e.knockTime--;
 
-      // simple aggro: if the player is close and roughly on the same level, chase
       const dx = (player.x + player.w / 2) - (e.x + e.w / 2);
       const dy = (player.y + player.h / 2) - (e.y + e.h / 2);
-      const near = Math.abs(dx) < 220 && Math.abs(dy) < 60;
-      e.aggro = near ? Math.min(60, e.aggro + 1) : Math.max(0, e.aggro - 1);
 
-      if (e.knockTime <= 0) {
-        const want = e.aggro > 20 ? Math.sign(dx) : e.facing;
-        e.facing = want || e.facing;
-        // ledge / wall check before stepping forward
-        const probe = { x: e.x + (e.facing > 0 ? e.w : -1), y: e.y + 2, w: 1, h: e.h };
-        const wallAhead = solids.some(s => rectsOverlap(probe, s));
-        const footProbe = { x: e.x + (e.facing > 0 ? e.w + 1 : -2), y: e.y + e.h + 1, w: 1, h: 2 };
-        const groundAhead = solids.some(s => rectsOverlap(footProbe, s));
-        if (wallAhead || (!groundAhead && e.onGround && e.aggro < 30)) {
-          e.facing *= -1;
-          e.vx = 0;
+      if (e.type === 'husk') {
+        const near = Math.abs(dx) < 220 && Math.abs(dy) < 60;
+        e.aggro = near ? Math.min(60, e.aggro + 1) : Math.max(0, e.aggro - 1);
+        if (e.knockTime <= 0) {
+          const want = e.aggro > 20 ? Math.sign(dx) : e.facing;
+          e.facing = want || e.facing;
+          const probe = { x: e.x + (e.facing > 0 ? e.w : -1), y: e.y + 2, w: 1, h: e.h };
+          const wallAhead = solids.some(s => rectsOverlap(probe, s));
+          const footProbe = { x: e.x + (e.facing > 0 ? e.w + 1 : -2), y: e.y + e.h + 1, w: 1, h: 2 };
+          const groundAhead = solids.some(s => rectsOverlap(footProbe, s));
+          if (wallAhead || (!groundAhead && e.onGround && e.aggro < 30)) {
+            e.facing *= -1; e.vx = 0;
+          } else {
+            e.vx = e.facing * (e.aggro > 20 ? 1.4 : 0.7);
+          }
         } else {
-          const speed = e.aggro > 20 ? 1.4 : 0.7;
-          e.vx = e.facing * speed;
+          e.vx *= 0.9;
         }
-      } else {
-        e.vx *= 0.9;
+      } else if (e.type === 'war') {
+        updateWar(e, dx);
       }
 
       e.vy += GRAVITY;
@@ -428,25 +570,18 @@
       moveAndCollide(e, e.vx, 0);
       moveAndCollide(e, 0, e.vy);
 
-      // contact damage to player
-      if (player.invuln <= 0 && rectsOverlap(player, e)) {
-        const kdx = (player.x + player.w / 2) - (e.x + e.w / 2);
-        player.vx = (kdx >= 0 ? 1 : -1) * 5;
-        player.vy = -5.5;
-        player.hp--;
-        player.invuln = 60;
-        player.hurtFlash = 16;
-        hitstop = 5;
-        shake = Math.max(shake, 7);
-        spawnParticles(player.x + player.w / 2, player.y + player.h / 2, 14, {
-          spread: 3.5, color: '#ff8a8a', life: 30,
-        });
-        if (player.hp <= 0) {
-          // respawn — keep it forgiving for now
-          player.hp = player.maxHp;
-          player.x = 60; player.y = 460; player.vx = 0; player.vy = 0;
-          player.invuln = 90;
-          shake = 14;
+      // contact damage to player (skip while War is winding up — sword does the damage)
+      const harmless = e.type === 'war' && (e.state === 'windup' || e.state === 'recover');
+      if (!harmless && player.invuln <= 0 && rectsOverlap(player, e)) {
+        damagePlayer(e);
+      }
+
+      // war sword hitbox
+      if (e.type === 'war' && e.state === 'swing' && !e.swingHit) {
+        const hb = warSwordHitbox(e);
+        if (rectsOverlap(player, hb) && player.invuln <= 0) {
+          e.swingHit = true;
+          damagePlayer(e, 2); // big sword hurts more
         }
       }
     }
@@ -652,45 +787,227 @@
 
   function drawEnemies() {
     for (const e of enemies) {
-      const ex = Math.round(e.x);
-      const ey = Math.round(e.y);
-      const cx = ex + e.w / 2;
-      const cy = ey + e.h / 2;
+      if (e.type === 'war') drawWar(e);
+      else drawHusk(e);
+    }
+  }
 
-      // sickly under-glow
-      const glow = ctx.createRadialGradient(cx, cy, 2, cx, cy, 30);
-      glow.addColorStop(0, 'rgba(180, 80, 100, 0.18)');
-      glow.addColorStop(1, 'rgba(180, 80, 100, 0)');
-      ctx.fillStyle = glow;
-      ctx.fillRect(cx - 32, cy - 32, 64, 64);
+  function drawHusk(e) {
+    const ex = Math.round(e.x);
+    const ey = Math.round(e.y);
+    const cx = ex + e.w / 2;
+    const cy = ey + e.h / 2;
 
-      // silhouette body — tilts with knockback
-      ctx.save();
-      ctx.translate(cx, ey + e.h);
-      if (e.knockTime > 0) ctx.rotate(-e.facing * 0.15);
-      ctx.fillStyle = e.hitFlash > 0 ? '#ffffff' : '#0a0d18';
-      ctx.fillRect(-e.w / 2, -e.h, e.w, e.h);
-      // ragged hem
-      ctx.fillRect(-e.w / 2 - 2, -4, e.w + 4, 4);
+    const glow = ctx.createRadialGradient(cx, cy, 2, cx, cy, 30);
+    glow.addColorStop(0, 'rgba(180, 80, 100, 0.18)');
+    glow.addColorStop(1, 'rgba(180, 80, 100, 0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(cx - 32, cy - 32, 64, 64);
 
-      if (e.hitFlash <= 0) {
-        // two glowing eyes, offset by facing
-        ctx.fillStyle = '#ff9b6e';
-        const eyeY = -e.h + 8;
-        const off = e.facing > 0 ? 1 : -1;
-        ctx.fillRect(-3 + off, eyeY, 2, 2);
-        ctx.fillRect(2 + off, eyeY, 2, 2);
-      }
-      ctx.restore();
+    ctx.save();
+    ctx.translate(cx, ey + e.h);
+    if (e.knockTime > 0) ctx.rotate(-e.facing * 0.15);
+    ctx.fillStyle = e.hitFlash > 0 ? '#ffffff' : '#0a0d18';
+    ctx.fillRect(-e.w / 2, -e.h, e.w, e.h);
+    ctx.fillRect(-e.w / 2 - 2, -4, e.w + 4, 4);
 
-      // hp pips above when damaged
-      if (e.hp < e.maxHp) {
-        for (let i = 0; i < e.maxHp; i++) {
-          ctx.fillStyle = i < e.hp ? '#e9d9a8' : 'rgba(255,255,255,0.15)';
-          ctx.fillRect(ex + i * 5, ey - 6, 3, 2);
-        }
+    if (e.hitFlash <= 0) {
+      ctx.fillStyle = '#ff9b6e';
+      const eyeY = -e.h + 8;
+      const off = e.facing > 0 ? 1 : -1;
+      ctx.fillRect(-3 + off, eyeY, 2, 2);
+      ctx.fillRect(2 + off, eyeY, 2, 2);
+    }
+    ctx.restore();
+
+    if (e.hp < e.maxHp) {
+      for (let i = 0; i < e.maxHp; i++) {
+        ctx.fillStyle = i < e.hp ? '#e9d9a8' : 'rgba(255,255,255,0.15)';
+        ctx.fillRect(ex + i * 5, ey - 6, 3, 2);
       }
     }
+  }
+
+  function drawWar(e) {
+    const ex = Math.round(e.x);
+    const ey = Math.round(e.y);
+    const cx = ex + e.w / 2;
+    const cy = ey + e.h / 2;
+
+    // crimson under-glow
+    const glow = ctx.createRadialGradient(cx, cy, 6, cx, cy, 90);
+    glow.addColorStop(0, 'rgba(220, 60, 60, 0.28)');
+    glow.addColorStop(1, 'rgba(220, 60, 60, 0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(cx - 90, cy - 90, 180, 180);
+
+    const flash = e.hitFlash > 0;
+
+    // body silhouette (cape silhouette behind, body in front)
+    ctx.save();
+    ctx.translate(cx, ey + e.h);
+    if (e.knockTime > 0) ctx.rotate(-e.facing * 0.08);
+
+    // tattered cape
+    ctx.fillStyle = flash ? '#ffffff' : '#1a0608';
+    ctx.beginPath();
+    const capeSide = -e.facing;
+    ctx.moveTo(capeSide * (e.w / 2 - 4), -e.h + 14);
+    ctx.lineTo(capeSide * (e.w / 2 + 14), -e.h / 2 + 6);
+    ctx.lineTo(capeSide * (e.w / 2 + 10), -4);
+    ctx.lineTo(capeSide * 2, -4);
+    ctx.lineTo(capeSide * 2, -e.h + 18);
+    ctx.closePath();
+    ctx.fill();
+
+    // body block
+    ctx.fillStyle = flash ? '#ffffff' : '#0c0610';
+    ctx.fillRect(-e.w / 2, -e.h, e.w, e.h);
+
+    // armor plates (subtle band highlights)
+    if (!flash) {
+      ctx.fillStyle = '#3a0d12';
+      ctx.fillRect(-e.w / 2 + 2, -e.h + 22, e.w - 4, 3);  // chest band
+      ctx.fillRect(-e.w / 2 + 2, -e.h + 36, e.w - 4, 3);  // waist band
+      ctx.fillStyle = '#1c0408';
+      ctx.fillRect(-e.w / 2 - 3, -4, e.w + 6, 5);         // ragged hem
+
+      // helmet
+      ctx.fillStyle = '#150307';
+      ctx.fillRect(-e.w / 2 + 3, -e.h, e.w - 6, 14);
+      // horns
+      ctx.beginPath();
+      ctx.moveTo(-e.w / 2 + 3, -e.h);
+      ctx.lineTo(-e.w / 2 - 3, -e.h - 8);
+      ctx.lineTo(-e.w / 2 + 7, -e.h - 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(e.w / 2 - 3, -e.h);
+      ctx.lineTo(e.w / 2 + 3, -e.h - 8);
+      ctx.lineTo(e.w / 2 - 7, -e.h - 2);
+      ctx.closePath();
+      ctx.fill();
+
+      // burning eye-slit
+      ctx.fillStyle = '#ff5a3a';
+      ctx.fillRect(-e.w / 2 + 8, -e.h + 6, e.w - 16, 2);
+      // small inner glow point that tracks player
+      ctx.fillStyle = '#ffd0a8';
+      const off = e.facing > 0 ? 2 : -2;
+      ctx.fillRect(off, -e.h + 6, 4, 2);
+    }
+    ctx.restore();
+
+    // ----- BIG SWORD -----
+    // Sword pivots from War's hand at shoulder height; pose depends on state.
+    const handX = cx + e.facing * (e.w / 2 - 4);
+    const handY = ey + 22;
+    let bladeAng;
+    if (e.state === 'windup') {
+      // raise over head — interpolate from rest to overhead
+      const t = Math.min(1, e.stateTime / 32);
+      const rest = e.facing > 0 ? Math.PI * 0.35 : Math.PI - Math.PI * 0.35;
+      const over = e.facing > 0 ? -Math.PI * 0.75 : Math.PI + Math.PI * 0.75;
+      bladeAng = rest + (over - rest) * easeOut(t);
+    } else if (e.state === 'swing') {
+      // sweep down across the front
+      const t = Math.min(1, e.stateTime / 16);
+      const over = e.facing > 0 ? -Math.PI * 0.75 : Math.PI + Math.PI * 0.75;
+      const down = e.facing > 0 ? Math.PI * 0.45 : Math.PI - Math.PI * 0.45;
+      bladeAng = over + (down - over) * easeIn(t);
+    } else if (e.state === 'charge') {
+      // sword leveled out front
+      bladeAng = e.facing > 0 ? 0 : Math.PI;
+    } else if (e.state === 'recover') {
+      const rest = e.facing > 0 ? Math.PI * 0.45 : Math.PI - Math.PI * 0.45;
+      bladeAng = rest;
+    } else {
+      // idle resting pose: blade pointed down-and-forward
+      bladeAng = e.facing > 0 ? Math.PI * 0.35 : Math.PI - Math.PI * 0.35;
+    }
+
+    const bladeLen = 70;
+    const bladeWidth = 8;
+    const tipX = handX + Math.cos(bladeAng) * bladeLen;
+    const tipY = handY + Math.sin(bladeAng) * bladeLen;
+
+    // swing motion blur trail
+    if (e.state === 'swing') {
+      ctx.strokeStyle = 'rgba(255, 180, 120, 0.35)';
+      ctx.lineWidth = 14;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      const over = e.facing > 0 ? -Math.PI * 0.75 : Math.PI + Math.PI * 0.75;
+      ctx.arc(handX, handY, bladeLen - 8,
+        Math.min(over, bladeAng), Math.max(over, bladeAng));
+      ctx.stroke();
+    }
+
+    // windup tell: faint glow on the blade while raising
+    if (e.state === 'windup') {
+      ctx.strokeStyle = 'rgba(255, 90, 60, 0.45)';
+      ctx.lineWidth = bladeWidth + 6;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(handX, handY);
+      ctx.lineTo(tipX, tipY);
+      ctx.stroke();
+    }
+
+    // blade
+    ctx.strokeStyle = '#c9cfdc';
+    ctx.lineWidth = bladeWidth;
+    ctx.lineCap = 'butt';
+    ctx.beginPath();
+    ctx.moveTo(handX + Math.cos(bladeAng) * 6, handY + Math.sin(bladeAng) * 6);
+    ctx.lineTo(tipX, tipY);
+    ctx.stroke();
+    // edge highlight
+    ctx.strokeStyle = '#f4f6fc';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(handX + Math.cos(bladeAng) * 8, handY + Math.sin(bladeAng) * 8);
+    ctx.lineTo(tipX, tipY);
+    ctx.stroke();
+
+    // crossguard
+    const guardAng = bladeAng + Math.PI / 2;
+    ctx.strokeStyle = '#5a1418';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(handX + Math.cos(guardAng) * 8, handY + Math.sin(guardAng) * 8);
+    ctx.lineTo(handX - Math.cos(guardAng) * 8, handY - Math.sin(guardAng) * 8);
+    ctx.stroke();
+
+    // hilt
+    ctx.fillStyle = '#2a0a0d';
+    ctx.fillRect(handX - 3, handY - 3, 6, 6);
+  }
+
+  function easeIn(t) { return t * t; }
+  function easeOut(t) { return 1 - (1 - t) * (1 - t); }
+
+  function drawBossBar() {
+    const boss = enemies.find(e => e.isBoss);
+    if (!boss) return;
+    const barW = 360, barH = 6;
+    const x = (W - barW) / 2;
+    const y = H - 28;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(x - 2, y - 2, barW + 4, barH + 4);
+    ctx.fillStyle = '#2a0a0d';
+    ctx.fillRect(x, y, barW, barH);
+    ctx.fillStyle = '#d44245';
+    ctx.fillRect(x, y, barW * (boss.hp / boss.maxHp), barH);
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillRect(x, y, barW * (boss.hp / boss.maxHp), 1);
+
+    ctx.fillStyle = '#cfd7e6';
+    ctx.font = '10px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('WAR', W / 2, y - 6);
+    ctx.textAlign = 'left';
   }
 
   function drawHUD() {
@@ -743,6 +1060,7 @@
     drawVignette();
     ctx.restore();
     drawHUD();
+    drawBossBar();
   }
 
   // ---------- main loop ----------
@@ -751,5 +1069,7 @@
     render();
     requestAnimationFrame(frame);
   }
+  // initial room load (honors URL hash, e.g. #boss)
+  loadRoom(location.hash.replace('#', '') || 'playground');
   requestAnimationFrame(frame);
 })();
