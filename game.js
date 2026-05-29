@@ -151,7 +151,7 @@
       stateTime: 0,
       cooldown: 60,
       swingHit: false,          // whether the current swing has connected
-      swingsSince: 0,           // basic swings since last "special" — used to cycle moves
+      attackIndex: 0,           // strict rotation: 0 swing, 1 slam, 2 charge
       queuedAttack: null,       // a forced next attack (e.g. charge after a backstab)
       isBoss: true,
     });
@@ -283,20 +283,19 @@
            segmentsCross(seg.x1, seg.y1, seg.x2, seg.y2, r.x,  r.y,  r.x,  ry2);
   }
 
-  // Pick War's next attack. Cycles swing -> swing -> special so the player
-  // sees all three moves in a fight, and honors a queuedAttack if one is set
-  // (e.g. a forced charge after taking a hit from behind).
-  function chooseWarAttack(e, adx) {
+  // Pick War's next attack. Strict rotation: swing -> slam -> charge -> repeat,
+  // so the player reliably sees every move within three attacks. Backstabs
+  // jump the queue with an immediate charge.
+  function chooseWarAttack(e) {
     if (e.queuedAttack) {
       const a = e.queuedAttack;
       e.queuedAttack = null;
       return a;
     }
-    e.swingsSince++;
-    if (e.swingsSince >= 3) {
-      e.swingsSince = 0;
-      return adx > 220 ? 'charge' : 'slamWindup';
-    }
+    const slot = e.attackIndex % 3;
+    e.attackIndex++;
+    if (slot === 1) return 'slamWindup';
+    if (slot === 2) return 'charge';
     return 'windup';
   }
 
@@ -321,20 +320,21 @@
         e.vx *= 0.8;
         facePlayer();
         if (e.cooldown > 0) { e.cooldown--; break; }
-        // queued punish (e.g. backstab) or scheduled special fires at any range
-        if (e.queuedAttack || e.swingsSince >= 2) {
-          commitAttack(chooseWarAttack(e, adx));
-        } else if (adx < 110) {
-          commitAttack(chooseWarAttack(e, adx));
+        // Slam and charge work at any range — only the basic swing needs to be close.
+        // Look at what would come out next without consuming it.
+        const next = e.queuedAttack || ['windup', 'slamWindup', 'charge'][e.attackIndex % 3];
+        if (next === 'windup') {
+          if (adx < 110) commitAttack(chooseWarAttack(e));
+          else { e.state = 'approach'; e.stateTime = 0; }
         } else {
-          e.state = 'approach'; e.stateTime = 0;
+          commitAttack(chooseWarAttack(e));
         }
         break;
       }
       case 'approach': {
         facePlayer();
         e.vx = e.facing * 1.6;
-        if (adx < 90) commitAttack(chooseWarAttack(e, adx));
+        if (adx < 90) commitAttack(chooseWarAttack(e));
         else if (e.stateTime > 90) { e.state = 'idle'; e.cooldown = 20; }
         break;
       }
@@ -1043,22 +1043,32 @@
       ctx.closePath();
       ctx.fill();
 
-      // burning eye-slit
-      ctx.fillStyle = '#ff5a3a';
+      // burning eye-slit — dim red bar
+      ctx.fillStyle = '#7a1a14';
       const slitLeft = -e.w / 2 + 8;
       const slitW = e.w - 16;
-      ctx.fillRect(slitLeft, -e.h + 6, slitW, 2);
+      const slitY = -e.h + 5;
+      const slitH = 4;
+      ctx.fillRect(slitLeft, slitY, slitW, slitH);
 
-      // inner glow point — tracks the player horizontally within the slit.
-      // far away in either direction = pinned to that edge of the slit.
-      ctx.fillStyle = '#ffd0a8';
-      const pupilW = 4;
-      const trackRange = 280; // px; beyond this the pupil is at the edge
+      // pupil — bright hot spot that tracks the player horizontally.
+      // pinned to the slit's edge when the player is far away in that direction.
+      const pupilW = 6;
+      const pupilH = 4;
+      const trackRange = 280;
       const tdx = (player.x + player.w / 2) - (e.x + e.w / 2);
       const t = Math.max(-1, Math.min(1, tdx / trackRange));
       const halfTravel = (slitW - pupilW) / 2;
       const pupilCenter = t * halfTravel;
-      ctx.fillRect(pupilCenter - pupilW / 2, -e.h + 6, pupilW, 2);
+      // outer warm glow
+      const pg = ctx.createRadialGradient(pupilCenter, slitY + slitH / 2, 0, pupilCenter, slitY + slitH / 2, 14);
+      pg.addColorStop(0, 'rgba(255, 220, 140, 0.7)');
+      pg.addColorStop(1, 'rgba(255, 220, 140, 0)');
+      ctx.fillStyle = pg;
+      ctx.fillRect(pupilCenter - 14, slitY - 5, 28, 14);
+      // hot core
+      ctx.fillStyle = '#fff6c0';
+      ctx.fillRect(pupilCenter - pupilW / 2, slitY, pupilW, pupilH);
     }
     ctx.restore();
 
