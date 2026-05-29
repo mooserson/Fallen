@@ -70,6 +70,7 @@
     if (!ROOMS[name]) name = 'playground';
     enemies.length = 0;
     particles.length = 0;
+    shockwaves.length = 0;
     ROOMS[name].build();
     const sp = ROOMS[name].playerSpawn;
     player.x = sp.x; player.y = sp.y;
@@ -155,6 +156,21 @@
   }
 
   let hitstop = 0; // frames where the world freezes for impact juice
+
+  // Shockwaves spawned by War's slam — travel along the floor in one direction.
+  const shockwaves = [];
+  function spawnShockwave(x, y, dir) {
+    shockwaves.push({
+      x, y,
+      dir,
+      vx: dir * 4.2,
+      life: 90,
+      maxLife: 90,
+      hit: false,
+      h: 22,
+      w: 26,
+    });
+  }
 
   // tuning (all in px/frame at 60fps)
   const GRAVITY = 0.6;
@@ -287,7 +303,8 @@
         facePlayer();
         if (e.cooldown > 0) { e.cooldown--; break; }
         if (adx < 110) commitAttack('windup');
-        else if (adx > 220 && Math.random() < 0.02) commitAttack('charge');
+        else if (adx > 200 && Math.random() < 0.025) commitAttack('slamWindup');
+        else if (adx > 260 && Math.random() < 0.02) commitAttack('charge');
         else { e.state = 'approach'; e.stateTime = 0; }
         break;
       }
@@ -300,7 +317,6 @@
       }
       case 'windup': {
         e.vx *= 0.7;
-        // facing locked
         if (e.stateTime >= 32) { e.state = 'swing'; e.stateTime = 0; }
         break;
       }
@@ -317,6 +333,53 @@
       case 'charge': {
         e.vx = e.facing * 5.5;
         if (e.stateTime >= 36 || adx < 40) { e.state = 'recover'; e.stateTime = 0; }
+        break;
+      }
+      case 'slamWindup': {
+        // crouch in place, build crimson glow
+        e.vx *= 0.6;
+        if (e.stateTime >= 24) {
+          // launch upward; airborne phase uses normal gravity
+          e.vy = -13.5;
+          e.vx = 0;
+          e.state = 'slamAir';
+          e.stateTime = 0;
+          // dust puff under feet
+          spawnParticles(e.x + e.w / 2, e.y + e.h, 18, {
+            spread: 4, color: '#6e2a2a', life: 30, gravity: 0.05,
+          });
+        }
+        break;
+      }
+      case 'slamAir': {
+        // hover the air time — gravity is applied in the main loop.
+        // Drift slightly toward the player at the apex so it tracks.
+        if (e.vy > 0 && e.stateTime > 8) {
+          e.vx = Math.sign(dx) * Math.min(2, adx / 90);
+        } else {
+          e.vx *= 0.95;
+        }
+        if (e.onGround && e.stateTime > 6) {
+          // LAND — spawn shockwaves and lock recovery
+          const groundY = e.y + e.h;
+          spawnShockwave(e.x + e.w / 2 - 6, groundY, -1);
+          spawnShockwave(e.x + e.w / 2 + 6, groundY,  1);
+          spawnParticles(e.x + e.w / 2, groundY, 36, {
+            spread: 6, color: '#a85a3a', life: 40, gravity: 0.15,
+          });
+          spawnParticles(e.x + e.w / 2, groundY, 18, {
+            spread: 4, color: '#2a0a0d', life: 30, gravity: 0.2,
+          });
+          hitstop = 6;
+          shake = Math.max(shake, 14);
+          e.state = 'slamLand';
+          e.stateTime = 0;
+        }
+        break;
+      }
+      case 'slamLand': {
+        e.vx *= 0.4;
+        if (e.stateTime >= 34) { e.state = 'idle'; e.cooldown = 50; }
         break;
       }
     }
@@ -606,8 +669,14 @@
       moveAndCollide(e, e.vx, 0);
       moveAndCollide(e, 0, e.vy);
 
-      // contact damage to player (skip while War is winding up — sword does the damage)
-      const harmless = e.type === 'war' && (e.state === 'windup' || e.state === 'recover');
+      // contact damage to player (skip during pure-telegraph or recover frames —
+      // those states only damage via their explicit hitboxes)
+      const harmless = e.type === 'war' && (
+        e.state === 'windup' ||
+        e.state === 'recover' ||
+        e.state === 'slamWindup' ||
+        e.state === 'slamLand'
+      );
       if (!harmless && player.invuln <= 0 && rectsOverlap(player, e)) {
         damagePlayer(e);
       }
@@ -622,6 +691,22 @@
           damagePlayer(e, 2);
         }
       }
+    }
+
+    // ----- shockwaves
+    for (let i = shockwaves.length - 1; i >= 0; i--) {
+      const sw = shockwaves[i];
+      sw.x += sw.vx;
+      sw.life--;
+      // hit player
+      if (!sw.hit && player.invuln <= 0) {
+        const swRect = { x: sw.x - sw.w / 2, y: sw.y - sw.h, w: sw.w, h: sw.h };
+        if (rectsOverlap(player, swRect)) {
+          sw.hit = true;
+          damagePlayer({ x: sw.x, y: sw.y - sw.h, w: 0, h: 0, isBoss: true }, 1);
+        }
+      }
+      if (sw.life <= 0 || sw.x < -40 || sw.x > W + 40) shockwaves.splice(i, 1);
     }
 
     if (player.invuln > 0) player.invuln--;
@@ -960,6 +1045,12 @@
     } else if (e.state === 'recover') {
       const rest = e.facing > 0 ? Math.PI * 0.45 : Math.PI - Math.PI * 0.45;
       bladeAng = rest;
+    } else if (e.state === 'slamWindup' || e.state === 'slamAir') {
+      // both-handed overhead — blade points straight up
+      bladeAng = -Math.PI / 2;
+    } else if (e.state === 'slamLand') {
+      // blade buried into the ground
+      bladeAng = Math.PI / 2;
     } else {
       // idle resting pose: blade pointed down-and-forward
       bladeAng = e.facing > 0 ? Math.PI * 0.35 : Math.PI - Math.PI * 0.35;
@@ -983,14 +1074,25 @@
     }
 
     // windup tell: faint glow on the blade while raising
-    if (e.state === 'windup') {
-      ctx.strokeStyle = 'rgba(255, 90, 60, 0.45)';
-      ctx.lineWidth = bladeWidth + 6;
+    if (e.state === 'windup' || e.state === 'slamWindup' || e.state === 'slamAir') {
+      const pulse = 0.35 + Math.sin(time * 0.45) * 0.15;
+      ctx.strokeStyle = `rgba(255, 90, 60, ${pulse})`;
+      ctx.lineWidth = bladeWidth + 8;
       ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(handX, handY);
       ctx.lineTo(tipX, tipY);
       ctx.stroke();
+    }
+
+    // slamWindup floor crack telegraph — a crimson glow where he'll land
+    if (e.state === 'slamWindup') {
+      const groundY = e.y + e.h + 4;
+      const grd = ctx.createRadialGradient(cx, groundY, 4, cx, groundY, 80);
+      grd.addColorStop(0, 'rgba(255, 90, 50, 0.35)');
+      grd.addColorStop(1, 'rgba(255, 90, 50, 0)');
+      ctx.fillStyle = grd;
+      ctx.fillRect(cx - 80, groundY - 30, 160, 60);
     }
 
     // blade
@@ -1025,6 +1127,54 @@
 
   function easeIn(t) { return t * t; }
   function easeOut(t) { return 1 - (1 - t) * (1 - t); }
+
+  function drawShockwaves() {
+    for (const sw of shockwaves) {
+      const t = 1 - sw.life / sw.maxLife;
+      const a = 1 - t * 0.7;
+      // wave grows as it travels
+      const h = sw.h * (0.6 + t * 0.8);
+      const w = sw.w * (0.6 + t * 1.4);
+      const cx = sw.x;
+      const baseY = sw.y;
+
+      // outer crimson aura
+      const grd = ctx.createRadialGradient(cx, baseY - h / 2, 2, cx, baseY - h / 2, h * 1.3);
+      grd.addColorStop(0, `rgba(255, 110, 60, ${0.45 * a})`);
+      grd.addColorStop(1, 'rgba(255, 110, 60, 0)');
+      ctx.fillStyle = grd;
+      ctx.fillRect(cx - h * 1.3, baseY - h * 1.3, h * 2.6, h * 2.6);
+
+      // jagged crescent — fan of triangles along the ground
+      ctx.fillStyle = `rgba(255, 200, 130, ${0.6 * a})`;
+      ctx.beginPath();
+      const steps = 5;
+      for (let i = 0; i < steps; i++) {
+        const off = (i - (steps - 1) / 2) * (w / steps);
+        const tipH = h * (0.6 + Math.sin(i + sw.life * 0.4) * 0.3);
+        ctx.moveTo(cx + off - 3, baseY);
+        ctx.lineTo(cx + off, baseY - tipH);
+        ctx.lineTo(cx + off + 3, baseY);
+      }
+      ctx.fill();
+
+      // dark base ridge
+      ctx.fillStyle = `rgba(40, 8, 12, ${a})`;
+      ctx.fillRect(cx - w / 2, baseY - 4, w, 4);
+
+      // dust mote trail
+      if (sw.life % 3 === 0) {
+        particles.push({
+          x: cx - sw.dir * 6,
+          y: baseY - 2,
+          vx: -sw.dir * 0.4 + (Math.random() - 0.5) * 0.4,
+          vy: -0.5 - Math.random() * 0.6,
+          life: 22, maxLife: 22,
+          color: '#8a4030', size: 1.4, gravity: 0.05,
+        });
+      }
+    }
+  }
 
   function drawBossBar() {
     const boss = enemies.find(e => e.isBoss);
@@ -1092,6 +1242,7 @@
     }
     drawBackground();
     drawSolids();
+    drawShockwaves();
     drawParticles();
     drawEnemies();
     drawPlayer();
