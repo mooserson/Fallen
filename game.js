@@ -146,11 +146,13 @@
       dead: false,
       aggro: 0,
       contactDmg: 1,
-      // AI state machine: idle | approach | windup | swing | recover | charge
+      // AI state machine: idle | approach | windup | swing | recover | charge | slamWindup | slamAir | slamLand
       state: 'idle',
       stateTime: 0,
       cooldown: 60,
       swingHit: false,          // whether the current swing has connected
+      swingsSince: 0,           // basic swings since last "special" — used to cycle moves
+      queuedAttack: null,       // a forced next attack (e.g. charge after a backstab)
       isBoss: true,
     });
   }
@@ -281,6 +283,23 @@
            segmentsCross(seg.x1, seg.y1, seg.x2, seg.y2, r.x,  r.y,  r.x,  ry2);
   }
 
+  // Pick War's next attack. Cycles swing -> swing -> special so the player
+  // sees all three moves in a fight, and honors a queuedAttack if one is set
+  // (e.g. a forced charge after taking a hit from behind).
+  function chooseWarAttack(e, adx) {
+    if (e.queuedAttack) {
+      const a = e.queuedAttack;
+      e.queuedAttack = null;
+      return a;
+    }
+    e.swingsSince++;
+    if (e.swingsSince >= 3) {
+      e.swingsSince = 0;
+      return adx > 220 ? 'charge' : 'slamWindup';
+    }
+    return 'windup';
+  }
+
   // The full War boss AI lives here so the enemy loop stays readable.
   // Facing only updates in idle/approach. Once he commits to windup/swing/charge,
   // facing is locked so jumping over him doesn't snap him around mid-attack.
@@ -302,16 +321,20 @@
         e.vx *= 0.8;
         facePlayer();
         if (e.cooldown > 0) { e.cooldown--; break; }
-        if (adx < 110) commitAttack('windup');
-        else if (adx > 200 && Math.random() < 0.025) commitAttack('slamWindup');
-        else if (adx > 260 && Math.random() < 0.02) commitAttack('charge');
-        else { e.state = 'approach'; e.stateTime = 0; }
+        // queued punish (e.g. backstab) or scheduled special fires at any range
+        if (e.queuedAttack || e.swingsSince >= 2) {
+          commitAttack(chooseWarAttack(e, adx));
+        } else if (adx < 110) {
+          commitAttack(chooseWarAttack(e, adx));
+        } else {
+          e.state = 'approach'; e.stateTime = 0;
+        }
         break;
       }
       case 'approach': {
         facePlayer();
         e.vx = e.facing * 1.6;
-        if (adx < 90) commitAttack('windup');
+        if (adx < 90) commitAttack(chooseWarAttack(e, adx));
         else if (e.stateTime > 90) { e.state = 'idle'; e.cooldown = 20; }
         break;
       }
@@ -609,6 +632,14 @@
           shake = Math.max(shake, 5);
           // sword-recoil: a tiny pop back for the player feels great
           player.vx -= player.facing * 1.2;
+
+          // backstab punish: if War was hit from behind, queue a charge as
+          // his very next action. He still finishes any current attack first.
+          if (e.type === 'war') {
+            const fromBehind = (e.facing > 0 && player.x + player.w / 2 < e.x + e.w / 2)
+                            || (e.facing < 0 && player.x + player.w / 2 > e.x + e.w / 2);
+            if (fromBehind) e.queuedAttack = 'charge';
+          }
           spawnParticles(e.x + e.w / 2, e.y + e.h / 2, 10, {
             spread: 3, color: '#ffd9a0', life: 22, gravity: 0.05,
           });
@@ -1014,11 +1045,20 @@
 
       // burning eye-slit
       ctx.fillStyle = '#ff5a3a';
-      ctx.fillRect(-e.w / 2 + 8, -e.h + 6, e.w - 16, 2);
-      // small inner glow point that tracks player
+      const slitLeft = -e.w / 2 + 8;
+      const slitW = e.w - 16;
+      ctx.fillRect(slitLeft, -e.h + 6, slitW, 2);
+
+      // inner glow point — tracks the player horizontally within the slit.
+      // far away in either direction = pinned to that edge of the slit.
       ctx.fillStyle = '#ffd0a8';
-      const off = e.facing > 0 ? 2 : -2;
-      ctx.fillRect(off, -e.h + 6, 4, 2);
+      const pupilW = 4;
+      const trackRange = 280; // px; beyond this the pupil is at the edge
+      const tdx = (player.x + player.w / 2) - (e.x + e.w / 2);
+      const t = Math.max(-1, Math.min(1, tdx / trackRange));
+      const halfTravel = (slitW - pupilW) / 2;
+      const pupilCenter = t * halfTravel;
+      ctx.fillRect(pupilCenter - pupilW / 2, -e.h + 6, pupilW, 2);
     }
     ctx.restore();
 
