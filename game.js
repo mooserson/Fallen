@@ -25,6 +25,7 @@
   // ---------- level ----------
   // Each room is a self-contained set of solids + a spawn hook. Routed by location.hash.
   let solids = [];
+  let doors = [];
 
   const ROOMS = {
     playground: {
@@ -50,6 +51,9 @@
         spawnHusk(860, 290);
       },
       playerSpawn: { x: 60, y: 460 },
+      doors: [
+        { x: 902, y: 446, w: 30, h: 54, to: 'boss', label: 'WAR', glow: '255, 90, 60' },
+      ],
     },
     boss: {
       build() {
@@ -63,15 +67,20 @@
         spawnWar(W - 180, 420);
       },
       playerSpawn: { x: 80, y: 460 },
+      doors: [
+        { x: 28, y: 446, w: 30, h: 54, to: 'playground', label: 'LEAVE', glow: '140, 180, 255' },
+      ],
     },
   };
 
   function loadRoom(name) {
+    name = (name || '').toLowerCase();
     if (!ROOMS[name]) name = 'playground';
     enemies.length = 0;
     particles.length = 0;
     shockwaves.length = 0;
     ROOMS[name].build();
+    doors = ROOMS[name].doors || [];
     const sp = ROOMS[name].playerSpawn;
     player.x = sp.x; player.y = sp.y;
     player.vx = 0; player.vy = 0;
@@ -499,6 +508,17 @@
     const dashHit = tapped('shift');
     const attackHit = tapped('j', 'x');
 
+    // doors — press up / W while standing in a gate
+    if (player.onGround && tapped('w', 'arrowup')) {
+      for (const d of doors) {
+        if (rectsOverlap(player, d)) {
+          location.hash = '#' + d.to; // hashchange handler loads the room
+          pressed.clear();
+          return;
+        }
+      }
+    }
+
     // horizontal accel
     const dir = (right ? 1 : 0) - (left ? 1 : 0);
     if (dir !== 0 && player.dashTime <= 0) {
@@ -842,6 +862,61 @@
       if (s.h <= 24 && s.w > 30 && s.y < H - 30) {
         ctx.fillStyle = 'rgba(255, 180, 100, 0.06)';
         ctx.fillRect(s.x, s.y + s.h, s.w, 6);
+      }
+    }
+  }
+
+  function drawDoors() {
+    for (const d of doors) {
+      const cx = d.x + d.w / 2;
+      const pulse = 0.55 + Math.sin(time * 0.05) * 0.2;
+
+      // ambient glow spilling out of the gate
+      const g = ctx.createRadialGradient(cx, d.y + d.h / 2, 4, cx, d.y + d.h / 2, d.h * 1.1);
+      g.addColorStop(0, `rgba(${d.glow}, ${0.22 * pulse})`);
+      g.addColorStop(1, `rgba(${d.glow}, 0)`);
+      ctx.fillStyle = g;
+      ctx.fillRect(cx - d.h, d.y + d.h / 2 - d.h, d.h * 2, d.h * 2);
+
+      // stone frame
+      ctx.fillStyle = '#05070d';
+      ctx.fillRect(d.x - 5, d.y - 9, d.w + 10, d.h + 9);
+      // inner portal — vertical gradient fading up into dark
+      const ig = ctx.createLinearGradient(0, d.y, 0, d.y + d.h);
+      ig.addColorStop(0, `rgba(${d.glow}, 0.06)`);
+      ig.addColorStop(1, `rgba(${d.glow}, ${0.3 * pulse})`);
+      ctx.fillStyle = ig;
+      ctx.fillRect(d.x, d.y - 4, d.w, d.h + 4);
+      // frame rim light
+      ctx.fillStyle = 'rgba(180, 210, 255, 0.18)';
+      ctx.fillRect(d.x - 5, d.y - 9, d.w + 10, 1);
+
+      // drifting motes inside the portal
+      if (time % 9 === 0) {
+        particles.push({
+          x: d.x + 3 + Math.random() * (d.w - 6),
+          y: d.y + d.h - 4,
+          vx: (Math.random() - 0.5) * 0.2,
+          vy: -0.3 - Math.random() * 0.3,
+          life: 50, maxLife: 50,
+          color: `rgba(${d.glow}, 0.8)`, size: 1.3, gravity: 0,
+        });
+      }
+
+      // label
+      ctx.fillStyle = 'rgba(207, 215, 230, 0.55)';
+      ctx.font = '9px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(d.label, cx, d.y - 14);
+      ctx.textAlign = 'left';
+
+      // prompt when the player is standing in the gate
+      if (rectsOverlap(player, d)) {
+        const bob = Math.sin(time * 0.12) * 2;
+        ctx.fillStyle = '#ffe9a8';
+        ctx.textAlign = 'center';
+        ctx.fillText('▲', cx, d.y - 26 + bob);
+        ctx.textAlign = 'left';
       }
     }
   }
@@ -1292,6 +1367,7 @@
     }
     drawBackground();
     drawSolids();
+    drawDoors();
     drawShockwaves();
     drawParticles();
     drawEnemies();
